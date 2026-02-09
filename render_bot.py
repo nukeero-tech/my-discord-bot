@@ -79,7 +79,7 @@ async def on_message(message):
                 combined.save(out_final, format="PNG")
                 out_final.seek(0)
 
-            # 画像を送信（削除ボタンなし・ephemeral=True）
+            # 画像を送信
             await interaction.response.send_message(
                 content=f"あなたのID（{viewer_id}）を刻印しました。確認したら下の「メッセージを非表示にする」で消せます。", 
                 file=discord.File(out_final, "res.png"), 
@@ -88,4 +88,17 @@ async def on_message(message):
 
         button.callback = callback
         view.add_item(button)
-        await message.channel.send("画像が投稿されました（ぼかし済）",
+        # --- ここが修正箇所（閉じカッコをしっかり追加） ---
+        await message.channel.send(
+            "画像が投稿されました（ぼかし済）", 
+            file=discord.File(out_blur, "blur.png"), 
+            view=view
+        )
+
+# 実行
+keep_alive()
+token = os.getenv("DISCORD_BOT_TOKEN")
+if token:
+    bot.run(token)
+else:
+    print("Error: DISCORD_BOT_TOKEN is not set.")
