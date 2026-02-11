@@ -1,5 +1,3 @@
-
-
 import discord
 from discord.ext import commands
 from PIL import Image, ImageFilter, ImageDraw, ImageFont
@@ -33,24 +31,22 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    # Bot自身の発言、または添付ファイルがないメッセージは無視
     if message.author == bot.user or not message.attachments:
         return
     
-    # 全添付ファイルをループ処理
     for attachment in message.attachments:
         if any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg']):
             raw_data = await attachment.read()
             
-            # --- ぼかし画像作成 (PNG維持) ---
+            # --- ぼかし画像作成 ---
             with Image.open(io.BytesIO(raw_data)) as img:
-                img = img.convert("RGBA") # PNGの透明度を扱えるように変換
+                img = img.convert("RGBA")
                 blurred = img.filter(ImageFilter.GaussianBlur(radius=15))
                 out_blur = io.BytesIO()
                 blurred.save(out_blur, format="PNG")
                 out_blur.seek(0)
 
-            # --- ボタンと刻印処理のクラス ---
+            # --- ボタンと刻印処理 ---
             class ImageView(discord.ui.View):
                 def __init__(self, original_data):
                     super().__init__(timeout=None)
@@ -59,45 +55,44 @@ async def on_message(message):
                 @discord.ui.button(label="IDを刻印して表示", style=discord.ButtonStyle.green)
                 async def show_image(self, interaction: discord.Interaction, button: discord.ui.Button):
                     viewer_id = interaction.user.id
-                    
                     with Image.open(io.BytesIO(self.original_data)) as img:
                         img = img.convert("RGBA")
                         txt_layer = Image.new("RGBA", img.size, (255, 255, 255, 0))
                         draw = ImageDraw.Draw(txt_layer)
-                        
-                        # 画像サイズに合わせたフォントサイズ調整
                         font_size = max(20, img.width // 25)
                         try:
                             font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
                         except:
                             font = ImageFont.load_default()
-
                         text = f"ID: {viewer_id}"
                         bbox = draw.textbbox((0, 0), text, font=font)
                         x = img.width - (bbox[2]-bbox[0]) - 20
                         y = img.height - (bbox[3]-bbox[1]) - 20
-                        
-                        # ID刻印（半透明）
                         alpha_val = 150
-                        # 縁取り
                         for offset in [(-1,-1), (-1,1), (1,-1), (1,1)]:
                             draw.text((x + offset[0], y + offset[1]), text, font=font, fill=(0, 0, 0, alpha_val))
-                        # 本体
                         draw.text((x, y), text, font=font, fill=(255, 255, 255, alpha_val))
-                        
                         combined = Image.alpha_composite(img, txt_layer)
                         out_final = io.BytesIO()
                         combined.save(out_final, format="PNG")
                         out_final.seek(0)
-
                     await interaction.response.send_message(
                         content=f"あなたのID（{viewer_id}）を刻印しました。", 
                         file=discord.File(out_final, "decoded.png"), 
                         ephemeral=True
                     )
 
-           await message.channel.send(
+            # ここがエラーの原因だった箇所です（インテントを揃えました）
+            await message.channel.send(
                 content=f"画像「{attachment.filename}」を処理しました", 
                 file=discord.File(out_blur, "blur.png"), 
                 view=ImageView(raw_data)
-            ) # <--- この閉じカッコが必要でした
+            )
+
+# --- 実行部分 ---
+keep_alive()
+token = os.getenv("DISCORD_BOT_TOKEN")
+if token:
+    bot.run(token)
+else:
+    print("Error: DISCORD_BOT_TOKEN is not set.")
