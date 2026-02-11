@@ -1,3 +1,5 @@
+
+
 import discord
 from discord.ext import commands
 from PIL import Image, ImageFilter, ImageDraw, ImageFont
@@ -94,6 +96,8 @@ async def on_message(message):
                         ephemeral=True
                     )
 
-            # 1枚ごとにメッセージを送信
-            await message.channel.send(
-                content=f"画像「{attachment.filename}」を処理しました",
+           await message.channel.send(
+                content=f"画像「{attachment.filename}」を処理しました", 
+                file=discord.File(out_blur, "blur.png"), 
+                view=ImageView(raw_data)
+            ) # <--- この閉じカッコが必要でした
