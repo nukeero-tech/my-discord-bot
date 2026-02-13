@@ -13,100 +13,102 @@ def home(): return "OK"
 def run(): app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
 Thread(target=run).start()
 
-# 作業員を1人に絞り、無料プランのCPUを使い切らないように調整
+# 作業員を1人に制限
 executor = ThreadPoolExecutor(max_workers=1)
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# --- 画像処理（ID刻印） ---
-def apply_watermark_sync(data, vid):
+# --- 画像処理（ID刻印・同期処理） ---
+def process_img_sync(data, vid=None):
     with Image.open(io.BytesIO(data)) as img:
         img = img.convert("RGBA")
-        txt = Image.new("RGBA", img.size, (255, 255, 255, 0))
-        d = ImageDraw.Draw(txt)
-        fs = max(20, img.width // 25)
-        try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", fs)
-        except:
-            font = ImageFont.load_default()
+        if vid:
+            # 刻印モード
+            txt = Image.new("RGBA", img.size, (255, 255, 255, 0))
+            d = ImageDraw.Draw(txt)
+            fs = max(20, img.width // 25)
+            try: font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", fs)
+            except: font = ImageFont.load_default()
+            msg = f"ID: {vid}"
+            bbox = d.textbbox((0, 0), msg, font=font)
+            x, y = img.width - (bbox[2]-bbox[0]) - 20, img.height - (bbox[3]-bbox[1]) - 20
+            for o in [(-1,-1), (-1,1), (1,-1), (1,1)]:
+                d.text((x + o[0], y + o[1]), msg, font=font, fill=(0, 0, 0, 150))
+            d.text((x, y), msg, font=font, fill=(255, 255, 255, 150))
+            img = Image.alpha_composite(img, txt)
+        else:
+            # ぼかしモード
+            img = img.filter(ImageFilter.GaussianBlur(radius=10))
         
-        msg = f"ID: {vid}"
-        bbox = d.textbbox((0, 0), msg, font=font)
-        x, y = img.width - (bbox[2]-bbox[0]) - 20, img.height - (bbox[3]-bbox[1]) - 20
-        
-        # 視認性向上のための縁取り
-        for o in [(-1,-1), (-1,1), (1,-1), (1,1)]:
-            d.text((x + o[0], y + o[1]), msg, font=font, fill=(0, 0, 0, 150))
-        d.text((x, y), msg, font=font, fill=(255, 255, 255, 150))
-        
-        img = Image.alpha_composite(img, txt)
         out = io.BytesIO()
         img.save(out, format="PNG")
         out.seek(0)
         return out
 
 class BulkView(discord.ui.View):
-    def __init__(self, storage_channel_id, storage_message_id):
+    def __init__(self, original_msg_id, channel_id):
         super().__init__(timeout=None)
-        self.channel_id = storage_channel_id
-        self.message_id = storage_message_id
+        self.msg_id = original_msg_id
+        self.channel_id = channel_id
 
     @discord.ui.button(label="IDを刻印して表示", style=discord.ButtonStyle.green)
     async def show(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 1. 3秒ルール回避（最優先）
         await interaction.response.defer(ephemeral=True)
-
         try:
-            # 2. 別チャンネルのメッセージを再取得
+            # 元の画像があるメッセージを再取得
             channel = bot.get_channel(self.channel_id)
-            if not channel:
-                channel = await bot.fetch_channel(self.channel_id)
-            message = await channel.fetch_message(self.message_id)
+            message = await channel.fetch_message(self.msg_id)
             
             files = []
             loop = asyncio.get_running_loop()
-            
-            # 3. 添付ファイルを順番にダウンロードして加工
             for i, att in enumerate(message.attachments):
-                if any(att.filename.lower().endswith(e) for e in ['.png', '.jpg', '.jpeg']):
+                # ぼかしではない「元画像」が添付されているメッセージから読み取る
+                if "blur_" not in att.filename:
                     data = await att.read()
-                    processed = await loop.run_in_executor(executor, apply_watermark_sync, data, interaction.user.id)
-                    files.append(discord.File(processed, filename=f"image_{i}.png"))
+                    processed = await loop.run_in_executor(executor, process_img_sync, data, interaction.user.id)
+                    files.append(discord.File(processed, filename=f"decoded_{i}.png"))
             
-            if files:
-                await interaction.followup.send(files=files, ephemeral=True)
-            else:
-                await interaction.followup.send("画像が見つかりませんでした。", ephemeral=True)
-        
+            await interaction.followup.send(files=files, ephemeral=True)
         except Exception as e:
-            print(f"Error fetching from storage: {e}")
-            await interaction.followup.send("データの取得に失敗しました。時間切れの可能性があります。", ephemeral=True)
+            await interaction.followup.send("エラー：元の画像が見つかりませんでした。", ephemeral=True)
 
 @bot.event
 async def on_message(message):
     if message.author == bot.user or not message.attachments: return
 
-    # 画像があるか確認
+    # --- 設定 ---
+    STORAGE_CHANNEL_ID = 1471824733652910101  # ←表示させたい別チャンネルのID
+
+    # 画像アタッチメントのみ抽出
     valid_atts = [a for a in message.attachments if any(a.filename.lower().endswith(e) for e in ['.png', '.jpg', '.jpeg'])]
     if not valid_atts: return
 
-    # --- ストレージ用設定 ---
-    # ここに「保存先」のチャンネルIDを入れてください
-    STORAGE_CHANNEL_ID = 1471856587915268096  # ←書き換えてください！
-    
     storage_channel = bot.get_channel(STORAGE_CHANNEL_ID)
-    if storage_channel:
-        # 1. 保存用チャンネルに画像を転送（バックアップ）
-        files = [await a.to_file() for a in valid_atts]
-        stored_msg = await storage_channel.send(f"User: {message.author.id}", files=files)
-        
-        # 2. 元のチャンネルに「ボタンだけ」送る
-        # メモリには「チャンネルIDとメッセージID」という数字だけを渡すので超軽量！
-        await message.channel.send(
-            content=f"{len(valid_atts)} 枚の画像を保管しました。ボタンから刻印版を確認できます。",
-            view=BulkView(STORAGE_CHANNEL_ID, stored_msg.id)
-        )
+    if not storage_channel:
+        storage_channel = await bot.fetch_channel(STORAGE_CHANNEL_ID)
+
+    # 1. まず元画像を保管チャンネルに転送（これは隠しログ用）
+    orig_files = [await a.to_file() for a in valid_atts]
+    stored_msg = await storage_channel.send(f"送信者: {message.author} (ID: {message.author.id}) の元画像", files=orig_files)
+
+    # 2. ぼかし画像を作成
+    loop = asyncio.get_running_loop()
+    blur_files = []
+    for att in valid_atts:
+        data = await att.read()
+        b_data = await loop.run_in_executor(executor, process_img_sync, data)
+        blur_files.append(discord.File(b_data, filename=f"blur_{att.filename}"))
+
+    # 3. 保管チャンネルに「ぼかし画像」と「ボタン」を出す
+    await storage_channel.send(
+        content=f"【新規依頼】送信者: {message.author.mention} が画像を投稿しました。",
+        files=blur_files,
+        view=BulkView(stored_msg.id, STORAGE_CHANNEL_ID)
+    )
+
+    # メインチャンネル側には受付完了だけ出す（スッキリ！）
+    await message.channel.send(f"✅ 画像を受付。{storage_channel.mention} を確認してください。", delete_after=10)
 
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
