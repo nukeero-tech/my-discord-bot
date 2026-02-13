@@ -1,100 +1,112 @@
 import discord
 from discord.ext import commands
 from PIL import Image, ImageFilter, ImageDraw, ImageFont
-import io
-import os
-import asyncio
+import io, os, asyncio
 from flask import Flask
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor
 
-# --- Webサーバー ---
+# --- Webサーバー (Render居眠り防止) ---
 app = Flask('')
 @app.route('/')
 def home(): return "OK"
 def run(): app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
 Thread(target=run).start()
 
-# CPU負荷を抑えるために作業員を1人に固定
+# 作業員を1人に絞り、無料プランのCPUを使い切らないように調整
 executor = ThreadPoolExecutor(max_workers=1)
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# 重い画像処理を完全に分離
-def process_sync(data, vid=None):
+# --- 画像処理（ID刻印） ---
+def apply_watermark_sync(data, vid):
     with Image.open(io.BytesIO(data)) as img:
         img = img.convert("RGBA")
-        if vid:
-            # ID刻印
-            txt = Image.new("RGBA", img.size, (255, 255, 255, 0))
-            d = ImageDraw.Draw(txt)
-            fs = max(20, img.width // 25)
-            try: font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", fs)
-            except: font = ImageFont.load_default()
-            msg = f"ID: {vid}"
-            bbox = d.textbbox((0, 0), msg, font=font)
-            x, y = img.width - (bbox[2]-bbox[0]) - 20, img.height - (bbox[3]-bbox[1]) - 20
-            for o in [(-1,-1), (-1,1), (1,-1), (1,1)]:
-                d.text((x + o[0], y + o[1]), msg, font=font, fill=(0, 0, 0, 150))
-            d.text((x, y), msg, font=font, fill=(255, 255, 255, 150))
-            img = Image.alpha_composite(img, txt)
-        else:
-            # ぼかし（軽量化のため半径を20に）
-            img = img.filter(ImageFilter.GaussianBlur(radius=20))
+        txt = Image.new("RGBA", img.size, (255, 255, 255, 0))
+        d = ImageDraw.Draw(txt)
+        fs = max(20, img.width // 25)
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", fs)
+        except:
+            font = ImageFont.load_default()
         
+        msg = f"ID: {vid}"
+        bbox = d.textbbox((0, 0), msg, font=font)
+        x, y = img.width - (bbox[2]-bbox[0]) - 20, img.height - (bbox[3]-bbox[1]) - 20
+        
+        # 視認性向上のための縁取り
+        for o in [(-1,-1), (-1,1), (1,-1), (1,1)]:
+            d.text((x + o[0], y + o[1]), msg, font=font, fill=(0, 0, 0, 150))
+        d.text((x, y), msg, font=font, fill=(255, 255, 255, 150))
+        
+        img = Image.alpha_composite(img, txt)
         out = io.BytesIO()
         img.save(out, format="PNG")
         out.seek(0)
         return out
 
 class BulkView(discord.ui.View):
-    def __init__(self, imgs):
+    def __init__(self, storage_channel_id, storage_message_id):
         super().__init__(timeout=None)
-        self.imgs = imgs
+        self.channel_id = storage_channel_id
+        self.message_id = storage_message_id
 
     @discord.ui.button(label="IDを刻印して表示", style=discord.ButtonStyle.green)
-    async def show(self, interaction, button):
-        # 何よりも先に、0.1秒でも早くこれを実行する
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except:
-            return 
+    async def show(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 1. 3秒ルール回避（最優先）
+        await interaction.response.defer(ephemeral=True)
 
-        loop = asyncio.get_event_loop()
-        files = []
-        for i, d in enumerate(self.imgs):
-            # 1枚ずつ順番に、CPUが空くのを待って処理
-            p = await loop.run_in_executor(executor, process_sync, d, interaction.user.id)
-            files.append(discord.File(p, filename=f"res_{i}.png"))
+        try:
+            # 2. 別チャンネルのメッセージを再取得
+            channel = bot.get_channel(self.channel_id)
+            if not channel:
+                channel = await bot.fetch_channel(self.channel_id)
+            message = await channel.fetch_message(self.message_id)
+            
+            files = []
+            loop = asyncio.get_running_loop()
+            
+            # 3. 添付ファイルを順番にダウンロードして加工
+            for i, att in enumerate(message.attachments):
+                if any(att.filename.lower().endswith(e) for e in ['.png', '.jpg', '.jpeg']):
+                    data = await att.read()
+                    processed = await loop.run_in_executor(executor, apply_watermark_sync, data, interaction.user.id)
+                    files.append(discord.File(processed, filename=f"image_{i}.png"))
+            
+            if files:
+                await interaction.followup.send(files=files, ephemeral=True)
+            else:
+                await interaction.followup.send("画像が見つかりませんでした。", ephemeral=True)
         
-        await interaction.followup.send(files=files, ephemeral=True)
+        except Exception as e:
+            print(f"Error fetching from storage: {e}")
+            await interaction.followup.send("データの取得に失敗しました。時間切れの可能性があります。", ephemeral=True)
 
 @bot.event
 async def on_message(message):
     if message.author == bot.user or not message.attachments: return
+
+    # 画像があるか確認
+    valid_atts = [a for a in message.attachments if any(a.filename.lower().endswith(e) for e in ['.png', '.jpg', '.jpeg'])]
+    if not valid_atts: return
+
+    # --- ストレージ用設定 ---
+    # ここに「保存先」のチャンネルIDを入れてください
+    STORAGE_CHANNEL_ID = 1471856587915268096  # ←書き換えてください！
     
-    # 画像が含まれているかだけチェック
-    attachments = [a for a in message.attachments if any(a.filename.lower().endswith(e) for e in ['.png', '.jpg', '.jpeg'])]
-    if not attachments: return
-
-    # 【新戦略】まず「処理中...」とメッセージだけ先に送って、ボタンを有効化する
-    sent_msg = await message.channel.send("画像を読み込み中... 少々お待ちください。")
-    
-    raw_imgs = []
-    blur_files = []
-    loop = asyncio.get_event_loop()
-
-    for att in attachments:
-        data = await att.read()
-        raw_imgs.append(data)
-        # ぼかし処理を実行（1列に並んで）
-        b = await loop.run_in_executor(executor, process_sync, data)
-        blur_files.append(discord.File(b, filename=f"blur_{att.filename}"))
-
-    # ぼかしが終わったら、元の「読み込み中」メッセージを書き換える
-    await sent_msg.edit(content=f"{len(blur_files)} 枚の処理が完了しました。", attachments=blur_files, view=BulkView(raw_imgs))
+    storage_channel = bot.get_channel(STORAGE_CHANNEL_ID)
+    if storage_channel:
+        # 1. 保存用チャンネルに画像を転送（バックアップ）
+        files = [await a.to_file() for a in valid_atts]
+        stored_msg = await storage_channel.send(f"User: {message.author.id}", files=files)
+        
+        # 2. 元のチャンネルに「ボタンだけ」送る
+        # メモリには「チャンネルIDとメッセージID」という数字だけを渡すので超軽量！
+        await message.channel.send(
+            content=f"{len(valid_atts)} 枚の画像を保管しました。ボタンから刻印版を確認できます。",
+            view=BulkView(STORAGE_CHANNEL_ID, stored_msg.id)
+        )
 
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
-
