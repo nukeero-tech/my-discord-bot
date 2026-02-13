@@ -41,8 +41,8 @@ def process_sync(data, vid=None):
             d.text((x, y), msg, font=font, fill=(255, 255, 255, 150))
             img = Image.alpha_composite(img, txt)
         else:
-            # ぼかし（軽量化のため半径を5に）
-            img = img.filter(ImageFilter.GaussianBlur(radius=5))
+            # ぼかし（軽量化のため半径を20に）
+            img = img.filter(ImageFilter.GaussianBlur(radius=20))
         
         out = io.BytesIO()
         img.save(out, format="PNG")
@@ -97,3 +97,4 @@ async def on_message(message):
     await sent_msg.edit(content=f"{len(blur_files)} 枚の処理が完了しました。", attachments=blur_files, view=BulkView(raw_imgs))
 
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+
