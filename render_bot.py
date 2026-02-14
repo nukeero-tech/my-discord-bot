@@ -112,9 +112,10 @@ async def on_message(message):
 
     # メインチャンネルには「1枚目のぼかし」と「全枚数URLを持ったボタン」を送る
     await message.channel.send(
-        content=f"計 {len(all_urls)} 枚の画像を確認しました。ボタンを押すとあなたのID付きで全枚数を確認できます。",
+        content=f"計 {len(all_urls)} 枚の画像を確認しました。",
         file=preview_file,
         view=BulkView(all_urls)
     )
 
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+
